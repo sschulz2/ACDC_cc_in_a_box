@@ -1,4 +1,5 @@
 import numpy as np
+import xarray as xr
 import matplotlib.pyplot as plt
 
 def e_s(T): # saturation vapor pressure
@@ -46,43 +47,36 @@ def C3(c_L,F):
     omega_c = (c_L)/(tau_c*(c_L + (K_C*(1 + (O/K_O)))))
     I = (F/(h*nu_v*Avo))*1e6# photon flux density (micro mol photons/m^2/s)
     j = 0.5*f_RCHL*I/rho_CHL # electron transport rate (micro mol e-/g CHL/s)
-    if j > j_max: # saturation value
-        j = j_max
+    j = np.minimum(j, j_max) # saturation value
     jp = j/(4 + (4*phi))  
     mp = m/(2 + (1.5*phi))
     p = omega_c*R_p
     b = jp + p + (jp*p/mp)
     c = jp*p
     vc_Rlimit = 0.5*(b - (((b**2) - (4*c))**0.5))
-    vc = min(vc_Rlimit,omega_c*E_t)                         # umol CO2/gCHl/s 
+    vc = np.minimum(vc_Rlimit,omega_c*E_t)                  # umol CO2/gCHl/s
     A = M_CO2*(1e-6)*((rho_CHL*(1 - (0.5*phi))*vc) - R_d)   # kg CO2/m^2/s
     Q_P = M_H2O*(1e-06)*rho_CHL*j	                    # kg H2O/m^2/s
     return(A,Q_P)
 
-def calc_Dc(c_A,c_L,W):
+def calc_Dc(c_A,c_L,W, g_V): # g_V Stomatal conductance of veg [m/s]
     ######### CONSTANTS ##################################
     M_CO2 = 44.009e-03		# molar mass of CO2 [kg/mol]
     M_air = 28.96e-03		# molar mass of air [kg/mol]
     rho_a = 1.25			# density of air [kg/m^3]
     P_a = 1013
     ####### DIFFUSION OF CO_2 into leaf [kg CO2/m^2 leaf area /s]
-    g_V = 1/200			# Stomatal conductance of veg [m/s]
     D_c = (M_CO2/M_air)*(1/P_a)*rho_a*g_V*W*(c_A - c_L)
     return(D_c)
 
 #def C3_leaf_module(F,w_V,theta_A,theta_F,T_S,q_A,ep_A,ep_F):
-def GPP_Module(F,W,c_A):
-######## BASED ON QUICK EQUILIBRATION BETWEEN LEAF AND ATMOS.	
+def GPP_Module(F,W,c_A,g_V):
+######## BASED ON QUICK EQUILIBRATION BETWEEN LEAF AND ATMOS.
     N = 100
     c_V = np.linspace(.01,c_A,N) # range of possible C_L values
-    i = 0
-    D = np.zeros(N)
-    A = np.zeros(N)
-    QP = np.zeros(N)
-    while i < N:
-        D[i] = calc_Dc(c_A,c_V[i],W)
-        A[i],QP[i] = C3(c_V[i],F)
-        i+=1
+    D = calc_Dc(c_A,c_V,W,g_V)
+    A,QP = C3(c_V,F)
+    QP = np.full_like(c_V, QP) # Q_P doesn't depend on c_L, so C3 returns it as a scalar; broadcast to match c_V like the original per-element loop did
     Cidx = np.argmin(abs(D - A))
     A = A*(12/44.) # Converting to carbon mass [kg C/m^2/s]
     return(c_V[Cidx],A[Cidx],QP[Cidx])
@@ -104,7 +98,7 @@ def rate_constants(T,S):
 
     return(K_zed,K_1,K_2)
 
-def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0):
+def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0, g_V = 1/200):
     # the 0*t is a hacky way to make sure the function returns an array
     nyear = int(nyear)
     ###### GLOBAL PARAMETERS
@@ -183,6 +177,7 @@ def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0):
     F_LAND = np.zeros(shape=N)
     dummy = np.zeros(shape=N)
     F_rad = np.zeros(shape=N)
+    GPP_ts = np.zeros(shape=N)
     ################# INITIAL CONDITIONS
     i = 0
     c_A[i] = c_base
@@ -201,18 +196,19 @@ def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0):
 
         SWX = 200                                            # Summertime max shortwave [W/m^2]
         #Calculate pco2 at surface
-        K_0,K_1,K_2 = rate_constants(T_O[i,:] + T_base,S) # all in mol/kg except K0 in mol/kg/atmos
-        pco2[i] = (MCO2/MAIR)*(K_2[0])*(((2*DIC[i,0]) - ALK)**2)/((K_1[0]*K_0[0])*(ALK - DIC[i,0])) #ppmv
+        K_0,K_1,K_2 = rate_constants(T_O[i,0] + T_base,S) # all in mol/kg except K0 in mol/kg/atmos; only surface layer is used below
+        pco2[i] = (MCO2/MAIR)*(K_2)*(((2*DIC[i,0]) - ALK)**2)/((K_1*K_0)*(ALK - DIC[i,0])) #ppmv
         # Air sea energy mixing
         E_airsea = (T_A[i] - T_O[i,0])/Tau_ML                  	# in K/s
-        C_airsea = K_0[0]*(c_A[i] - pco2[i])/Tau_ML 	    	# in umol CO2/kg/s
+        C_airsea = K_0*(c_A[i] - pco2[i])/Tau_ML 	    	# in umol CO2/kg/s
         # Diffusive ocean energy mixing
         DE_surf = kappa*(T_O[i,0] - T_O[i,1])/(H_O**2)                      # Finite difference K/s
         DOE     = kappa*(T_O[i,:-2] - 2*T_O[i,1:-1] + T_O[i,2:])/(H_O**2)   # Finite differene K/s
         DC_surf = kappa*(DIC[i,0] - DIC[i,1])/(H_O**2)                      # Finite difference umol C/kg/s
         DOC     = kappa*(DIC[i,:-2] - 2*DIC[i,1:-1] + DIC[i,2:])/(H_O**2)   # Finite difference umol C/kg/s
         # Primary Productivity on the land surface
-        c_v,GPP,QP = GPP_Module(SWX,W_X[i],P_A*c_A[i]*1e-06)                # GPP Calculation kg C/m^2/s
+        c_v,GPP,QP = GPP_Module(SWX,W_X[i],P_A*c_A[i]*1e-06,g_V)                # GPP Calculation kg C/m^2/s
+        GPP_ts[i+1] = GPP
         # Respiration
         R_VEG = (a_o + (a_1*(T_A[i])/10))*GPP                               # kg C /m^2/s
         Soil_in = GPP*beta                                                  # kg C /m^2/s
@@ -264,7 +260,36 @@ def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0):
 
         #STEP
         i+=1
-    return(time,T_A,c_A,T_O,pco2,DIC,F_AS*dt,F_LAND*dt,W_X,F_rad)
+
+    # Package outputs into a labeled xarray.Dataset (all math above is untouched numpy).
+    # Call .to_netcdf(path) on the result to write an actual netCDF file to disk.
+    ocean_depth = (np.arange(O_layers) + 0.5) * H_O  # layer-center depth [m]
+    ds = xr.Dataset(
+        data_vars=dict(
+            T_A=(["time"], T_A, {"long_name": "Atmospheric temperature anomaly", "units": "K"}),
+            c_A=(["time"], c_A, {"long_name": "Atmospheric CO2 concentration", "units": "ppmv"}),
+            T_O=(["time", "ocean_depth"], T_O, {"long_name": "Ocean temperature anomaly profile", "units": "K"}),
+            pco2=(["time_pco2"], pco2, {"long_name": "Ocean surface pCO2", "units": "ppmv"}),
+            DIC=(["time", "ocean_depth"], DIC, {"long_name": "Dissolved inorganic carbon", "units": "umol kg-1"}),
+            F_AS=(["time"], F_AS * dt, {"long_name": "Air-sea carbon flux, per timestep", "units": "kg C"}),
+            F_LAND=(["time"], F_LAND * dt, {"long_name": "Net land-atmosphere carbon flux, per timestep", "units": "kg C"}),
+            W_X=(["time"], W_X, {"long_name": "Land surface soil saturation", "units": "1"}),
+            F_rad=(["time"], F_rad, {"long_name": "Total radiative forcing at TOA", "units": "W m-2"}),
+            C_VEG=(["time"], C_VEG, {"long_name": "Vegetation carbon stock", "units": "kg C"}),
+            C_SOIL=(["time"], C_SOIL, {"long_name": "Soil carbon stock", "units": "kg C"}),
+            GPP=(["time"], GPP_ts, {"long_name": "Gross primary productivity", "units": "kg C m-2 s-1"}),
+        ),
+        coords=dict(
+            time=(["time"], time, {"long_name": "Time", "units": "years"}),
+            time_pco2=(["time_pco2"], time[:-1], {"long_name": "Time", "units": "years"}),
+            ocean_depth=(["ocean_depth"], ocean_depth, {"long_name": "Ocean layer center depth", "units": "m"}),
+        ),
+        attrs=dict(
+            description="Output of the toy carbon-climate box model `the_model`", nyear=nyear, timestep_seconds=dt,
+            A_O=A_O, H_O=H_O, rho_L=rho_L, M_A=M_A, MC=MC, MAIR=MAIR,
+        ),
+    )
+    return ds
 
 
 
