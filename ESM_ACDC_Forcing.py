@@ -154,6 +154,7 @@ def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0, g_V = 1/200):
     a_o = 0.75                  # minimum respiration
     a_1 = 0.001                 # respiration sensitivity to temperature
     beta = 0.25                 # fraction of GPP that goes into soil
+    tau = (1.4*365*24*60*60)    # timescale for relationship between plant carbon and respiration [s]
 
     # ORIGINAL PARAMS
     k_o = 2.9/(np.pi*1e9)       # timescale of heterotropic respiration [1/s]
@@ -204,14 +205,16 @@ def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0, g_V = 1/200):
         # Diffusive ocean energy mixing
         DE_surf = kappa*(T_O[i,0] - T_O[i,1])/(H_O**2)                      # Finite difference K/s
         DOE     = kappa*(T_O[i,:-2] - 2*T_O[i,1:-1] + T_O[i,2:])/(H_O**2)   # Finite differene K/s
+        DE_bot  = kappa*(T_O[i,-2] - T_O[i,-1])/(H_O**2)                    # No-flux bottom B.C.: flux from above only
         DC_surf = kappa*(DIC[i,0] - DIC[i,1])/(H_O**2)                      # Finite difference umol C/kg/s
         DOC     = kappa*(DIC[i,:-2] - 2*DIC[i,1:-1] + DIC[i,2:])/(H_O**2)   # Finite difference umol C/kg/s
+        DC_bot  = kappa*(DIC[i,-2] - DIC[i,-1])/(H_O**2)                    # No-flux bottom B.C.: flux from above only
         # Primary Productivity on the land surface
         c_v,GPP,QP = GPP_Module(SWX,W_X[i],P_A*c_A[i]*1e-06,g_V)                # GPP Calculation kg C/m^2/s
         GPP_ts[i+1] = GPP
         # Respiration
-        R_VEG = (a_o + (a_1*(T_A[i])/10))*GPP                               # kg C /m^2/s
-        Soil_in = GPP*beta                                                  # kg C /m^2/s
+        R_VEG = (a_o + (a_1*(T_A[i])/10))*C_VEG[i]/f_B/A_A/tau              # kg C /m^2/s
+        Soil_in = C_VEG[i]/f_B/A_A/tau*beta                                 # kg C /m^2/s GPP -> C_veg[i]/tau
         R_Soil = (k_o + (T_A[i]*k_1))*C_SOIL[i]                             # kg C/s
 
         # Land Surface Water Flux
@@ -242,11 +245,11 @@ def the_model(nyear = 3000,E_ = lambda t: 0, F_ext = lambda t: 0, g_V = 1/200):
         T_A[i+1] = T_A[i] + dTA_dt*dt                                       # Surface temperature
         T_O[i+1,0] = T_O[i,0] + (dTOsurf_dt)*dt                             # Ocean surface temperature
         T_O[i+1,1:-1] = T_O[i,1:-1] + (dt*DOE)                              # Interior Ocean Temperature
-        T_O[i+1,-1] = T_O[i+1,-2]                                           # No flux bottom B.C.
+        T_O[i+1,-1] = T_O[i,-1] + (dt*DE_bot)                               # No flux bottom B.C.
         c_A[i+1] = c_A[i] + (dcA_dt*dt)                                     # Atmospheric CO2
         DIC[i+1,0] = DIC[i,0] + dDIC_S_dt*dt                                # Oceanic carbon at surface
         DIC[i+1,1:-1] = DIC[i,1:-1] + (dt*DOC)                              # Oceanic interior
-        DIC[i+1,-1] = DIC[i+1,-2]                                           # No flux bottom B.C.
+        DIC[i+1,-1] = DIC[i,-1] + (dt*DC_bot)                               # No flux bottom B.C.
         W_X[i+1] = W_X[i] + dWX_dt*dt 
 
         C_VEG[i+1] = C_VEG[i] + (GPP - R_VEG - Soil_in)*f_B*A_A*dt
